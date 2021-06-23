@@ -14,7 +14,6 @@
 
 #include "tools/worker/work_processor.h"
 
-#include <google/protobuf/text_format.h>
 #include <sys/stat.h>
 
 #include <fstream>
@@ -31,9 +30,8 @@
 
 namespace {
 
-static void FinalizeWorkRequest(const blaze::worker::WorkRequest &request,
-                                blaze::worker::WorkResponse *response,
-                                int exit_code,
+static void FinalizeWorkRequest(const WorkRequest &request,
+                                WorkResponse *response, int exit_code,
                                 const std::ostringstream &output) {
   response->set_exit_code(exit_code);
   response->set_output(output.str());
@@ -46,9 +44,8 @@ WorkProcessor::WorkProcessor(const std::vector<std::string> &args) {
   universal_args_.insert(universal_args_.end(), args.begin(), args.end());
 }
 
-void WorkProcessor::ProcessWorkRequest(
-    const blaze::worker::WorkRequest &request,
-    blaze::worker::WorkResponse *response) {
+void WorkProcessor::ProcessWorkRequest(const WorkRequest &request,
+                                       WorkResponse *response) {
   std::vector<std::string> processed_args(universal_args_);
 
   // Bazel's worker spawning strategy reads the arguments from the params file
