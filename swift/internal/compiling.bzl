@@ -1802,8 +1802,14 @@ def compile(
     else:
         vfsoverlay_file = None
 
+    # force generated_module_map_file to be included on swiftc_input so the generated file will be guarantee to be place on bazel-out
+    _additional_inputs = []
+    _additional_inputs.extend(additional_inputs)
+    if compile_outputs.generated_module_map_file:
+        _additional_inputs.append(compile_outputs.generated_module_map_file)
+
     prerequisites = struct(
-        additional_inputs = additional_inputs,
+        additional_inputs = _additional_inputs,
         bin_dir = feature_configuration._bin_dir,
         cc_compilation_context = merged_providers.cc_info.compilation_context,
         defines = sets.to_list(defines_set),
@@ -2678,6 +2684,7 @@ def new_objc_provider(
         ),
         link_inputs = depset(additional_link_inputs + debug_link_inputs),
         linkopt = depset(user_link_flags + debug_link_flags),
+        module_map = depset([module_context.clang.module_map]) if module_context.clang.module_map else depset([]),
         providers = get_providers(
             deps,
             apple_common.Objc,
