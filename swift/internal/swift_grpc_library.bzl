@@ -182,7 +182,7 @@ def _register_grpcswift_generate_action(
         ],
         mnemonic = "ProtocGenSwiftGRPC",
         outputs = generated_files,
-        progress_message = "Generating Swift sources for {}".format(label),
+        progress_message = "Generating Swift sources for %{label}",
     )
 
     return generated_files
@@ -275,11 +275,9 @@ def _swift_grpc_library_impl(ctx):
 
     module_context, cc_compilation_outputs, other_compilation_outputs = swift_common.compile(
         actions = ctx.actions,
-        bin_dir = ctx.bin_dir,
         copts = ["-parse-as-library"],
         deps = compile_deps,
         feature_configuration = feature_configuration,
-        genfiles_dir = ctx.genfiles_dir,
         module_name = module_name,
         srcs = generated_files,
         swift_toolchain = swift_toolchain,
@@ -326,19 +324,19 @@ def _swift_grpc_library_impl(ctx):
         ),
     ]
 
-    # Propagate an `objc` provider if the toolchain supports Objective-C
-    # interop, which ensures that the libraries get linked via
-    # `apple_common.link_multi_arch_binary`.
-    if swift_toolchain.supports_objc_interop:
-        providers.append(new_objc_provider(
-            additional_objc_infos = (
-                swift_toolchain.implicit_deps_providers.objc_infos
-            ),
-            deps = compile_deps,
-            feature_configuration = feature_configuration,
-            module_context = module_context,
-            libraries_to_link = [linking_output.library_to_link],
-        ))
+    # Propagate an `apple_common.Objc` provider with linking info about the
+    # library so that linking with Apple Starlark APIs/rules works correctly.
+    # TODO(b/171413861): This can be removed when the Obj-C rules are migrated
+    # to use `CcLinkingContext`.
+    providers.append(new_objc_provider(
+        additional_objc_infos = (
+            swift_toolchain.implicit_deps_providers.objc_infos
+        ),
+        deps = compile_deps,
+        feature_configuration = feature_configuration,
+        module_context = module_context,
+        libraries_to_link = [linking_output.library_to_link],
+    ))
 
     return providers
 

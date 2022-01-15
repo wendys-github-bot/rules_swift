@@ -61,22 +61,24 @@ def _all_tool_configs(
     """
     _swift_driver_tool_config = swift_toolchain_config.driver_tool_config
 
+    tool_inputs = depset(additional_tools)
+
     compile_tool_config = _swift_driver_tool_config(
         driver_mode = "swiftc",
         swift_executable = swift_executable,
+        tool_inputs = tool_inputs,
         toolchain_root = toolchain_root,
         use_param_file = use_param_file,
         worker_mode = "persistent",
-        additional_tools = additional_tools,
     )
 
     return {
         swift_action_names.AUTOLINK_EXTRACT: _swift_driver_tool_config(
             driver_mode = "swift-autolink-extract",
             swift_executable = swift_executable,
+            tool_inputs = tool_inputs,
             toolchain_root = toolchain_root,
             worker_mode = "wrap",
-            additional_tools = additional_tools,
         ),
         swift_action_names.COMPILE: compile_tool_config,
         swift_action_names.DERIVE_FILES: compile_tool_config,
@@ -85,9 +87,9 @@ def _all_tool_configs(
             args = ["-modulewrap"],
             driver_mode = "swift",
             swift_executable = swift_executable,
+            tool_inputs = tool_inputs,
             toolchain_root = toolchain_root,
             worker_mode = "wrap",
-            additional_tools = additional_tools,
         ),
         swift_action_names.DUMP_AST: compile_tool_config,
     }
@@ -195,10 +197,7 @@ def _swift_toolchain_impl(ctx):
     # Swift.org toolchains assume everything is just available on the PATH so we
     # we don't pass any files unless we have a custom driver executable in the
     # workspace.
-    all_files = []
     swift_executable = get_swift_executable_for_toolchain(ctx)
-    if swift_executable:
-        all_files.append(swift_executable)
 
     all_tool_configs = _all_tool_configs(
         swift_executable = swift_executable,
@@ -216,12 +215,10 @@ def _swift_toolchain_impl(ctx):
     return [
         SwiftToolchainInfo(
             action_configs = all_action_configs,
-            all_files = depset(all_files),
             cc_toolchain_info = cc_toolchain,
             clang_implicit_deps_providers = (
                 collect_implicit_deps_providers([])
             ),
-            cpu = ctx.attr.arch,
             feature_allowlists = [
                 target[SwiftFeatureAllowlistInfo]
                 for target in ctx.attr.feature_allowlists
@@ -234,12 +231,9 @@ def _swift_toolchain_impl(ctx):
                 additional_cc_infos = [swift_linkopts_cc_info],
             ),
             linker_supports_filelist = False,
-            object_format = "elf",
             requested_features = requested_features,
             root_dir = toolchain_root,
-            supports_objc_interop = False,
             swift_worker = ctx.executable._worker,
-            system_name = ctx.attr.os,
             test_configuration = struct(
                 env = {},
                 execution_requirements = {},

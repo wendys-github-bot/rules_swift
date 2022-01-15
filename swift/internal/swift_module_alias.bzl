@@ -56,11 +56,9 @@ def _swift_module_alias_impl(ctx):
 
     module_context, compilation_outputs, other_compilation_outputs = swift_common.compile(
         actions = ctx.actions,
-        bin_dir = ctx.bin_dir,
         copts = ["-parse-as-library"],
         deps = deps,
         feature_configuration = feature_configuration,
-        genfiles_dir = ctx.genfiles_dir,
         module_name = module_name,
         srcs = [reexport_src],
         swift_toolchain = swift_toolchain,
@@ -111,19 +109,19 @@ def _swift_module_alias_impl(ctx):
         ),
     ]
 
-    # Propagate an `objc` provider if the toolchain supports Objective-C
-    # interop, which allows `objc_library` targets to import `swift_library`
-    # targets.
-    if swift_toolchain.supports_objc_interop:
-        providers.append(new_objc_provider(
-            additional_objc_infos = (
-                swift_toolchain.implicit_deps_providers.objc_infos
-            ),
-            deps = deps,
-            feature_configuration = feature_configuration,
-            module_context = module_context,
-            libraries_to_link = [linking_output.library_to_link],
-        ))
+    # Propagate an `apple_common.Objc` provider with linking info about the
+    # library so that linking with Apple Starlark APIs/rules works correctly.
+    # TODO(b/171413861): This can be removed when the Obj-C rules are migrated
+    # to use `CcLinkingContext`.
+    providers.append(new_objc_provider(
+        additional_objc_infos = (
+            swift_toolchain.implicit_deps_providers.objc_infos
+        ),
+        deps = deps,
+        feature_configuration = feature_configuration,
+        module_context = module_context,
+        libraries_to_link = [linking_output.library_to_link],
+    ))
 
     return providers
 

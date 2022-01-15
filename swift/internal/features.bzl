@@ -75,6 +75,20 @@ def configure_features(
         passed to other `swift_common` functions. Note that the structure of
         this value should otherwise not be relied on or inspected directly.
     """
+
+    # Always disable these two features so that any `cc_common` APIs called by
+    # `swift_common` APIs don't cause certain actions to be created (for
+    # example, when using `cc_common.compile` to create the compilation context
+    # for a generated header).
+    unsupported_features = list(unsupported_features)
+    unsupported_features.extend([
+        # Avoid making the `grep_includes` tool a requirement of Swift
+        # compilation APIs/rules that generate a header.
+        "cc_include_scanning",
+        # Don't register parse-header actions for generated headers.
+        "parse_headers",
+    ])
+
     if swift_toolchain.feature_allowlists:
         _check_allowlists(
             allowlists = swift_toolchain.feature_allowlists,
@@ -110,9 +124,19 @@ def configure_features(
     return struct(
         _cc_feature_configuration = cc_feature_configuration,
         _enabled_features = requestable_features,
+        # This is naughty, but APIs like `cc_common.compile` do far worse and
+        # "cheat" by accessing the full rule context through a back-reference in
+        # the `Actions` object so they can get access to the `-bin` and
+        # `-genfiles` roots, among other values. Since the feature configuration
+        # is a required argument of all action-registering APIs, and the context
+        # is a required argument when creating it, we'll take that opportunity
+        # to stash any context-dependent values that we want to access in the
+        # other APIs, so they don't have to be passed manually by the callers.
+        _bin_dir = ctx.bin_dir,
+        _genfiles_dir = ctx.genfiles_dir,
     )
 
-def features_for_build_modes(ctx, objc_fragment = None, cpp_fragment = None):
+def features_for_build_modes(ctx, cpp_fragment = None):
     """Returns a list of Swift toolchain features for current build modes.
 
     This function explicitly breaks the "don't pass `ctx` as an argument"
@@ -121,7 +145,6 @@ def features_for_build_modes(ctx, objc_fragment = None, cpp_fragment = None):
 
     Args:
         ctx: The current rule context.
-        objc_fragment: The Objective-C configuration fragment, if available.
         cpp_fragment: The Cpp configuration fragment, if available.
 
     Returns:
@@ -134,13 +157,7 @@ def features_for_build_modes(ctx, objc_fragment = None, cpp_fragment = None):
         features.append(SWIFT_FEATURE_COVERAGE)
     if compilation_mode in ("dbg", "fastbuild"):
         features.append(SWIFT_FEATURE_ENABLE_TESTING)
-
-    # TODO: Remove getattr once bazel is released with this change
-    if cpp_fragment and getattr(cpp_fragment, "apple_generate_dsym", False):
-        features.append(SWIFT_FEATURE_FULL_DEBUG_INFO)
-
-    # TODO: Remove the objc_fragment usage once bazel is released with the C++ change
-    if objc_fragment and getattr(objc_fragment, "generate_dsym", False):
+    if cpp_fragment and cpp_fragment.apple_generate_dsym:
         features.append(SWIFT_FEATURE_FULL_DEBUG_INFO)
     return features
 
@@ -269,11 +286,12 @@ def _is_feature_allowed_in_package(
         else:
             is_match = package_spec == package_info.package
 
-        # Package exclusions always take precedence over package inclusions, so
-        # if we have an exclusion match, return false immediately.
-        if package_info.excluded and is_match:
-            return False
-        else:
-            is_allowed = True
+        if is_match:
+            # Package exclusions always take precedence over package inclusions,
+            # so if we have an exclusion match, return false immediately.
+            if package_info.excluded:
+                return False
+            else:
+                is_allowed = True
 
     return is_allowed

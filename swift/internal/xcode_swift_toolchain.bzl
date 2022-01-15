@@ -57,6 +57,7 @@ load(
     "collect_implicit_deps_providers",
     "compact",
     "get_swift_executable_for_toolchain",
+    "resolve_optional_tool",
 )
 
 def _swift_developer_lib_dir(platform_framework_dir):
@@ -268,7 +269,7 @@ def _features_for_bitcode_mode(bitcode_mode):
     """Gets the list of features to enable for the selected Bitcode mode.
 
     Args:
-        bitcode_mode: The `bitcode_mode` value from the Apple configuration
+        bitcode_mode: The `bitcode_mode` value from the C++ configuration
             fragment.
 
     Returns:
@@ -495,7 +496,7 @@ def _all_action_configs(
     action_configs.extend(compile_action_configs(
         additional_objc_copts = additional_objc_copts,
         additional_swiftc_copts = additional_swiftc_copts,
-        generated_header_rewriter = generated_header_rewriter,
+        generated_header_rewriter = generated_header_rewriter.executable,
     ))
     return action_configs
 
@@ -514,9 +515,9 @@ def _all_tool_configs(
             one was requested.
         env: The environment variables to set when launching tools.
         execution_requirements: The execution requirements for tools.
-        generated_header_rewriter: An executable that will be invoked after
-            compilation to rewrite the generated header, or None if this is not
-            desired.
+        generated_header_rewriter: A `struct` returned by
+            `resolve_optional_tool` that represents an executable that will be
+            invoked after compilation to rewrite the generated header.
         swift_executable: A custom Swift driver executable to be used during the
             build, if provided.
         toolchain_root: The root directory of the toolchain, if provided.
@@ -533,16 +534,13 @@ def _all_tool_configs(
         env = dict(env)
         env["TOOLCHAINS"] = custom_toolchain
 
-    additional_compile_tools = []
-    if generated_header_rewriter:
-        additional_compile_tools.append(generated_header_rewriter)
-
     tool_config = swift_toolchain_config.driver_tool_config(
-        additional_tools = additional_compile_tools,
         driver_mode = "swiftc",
         env = env,
         execution_requirements = execution_requirements,
         swift_executable = swift_executable,
+        tool_input_manifests = generated_header_rewriter.input_manifests,
+        tool_inputs = generated_header_rewriter.inputs,
         toolchain_root = toolchain_root,
         use_param_file = True,
         worker_mode = "persistent",
@@ -637,6 +635,7 @@ def _xcode_env(xcode_config, platform):
 
 def _xcode_swift_toolchain_impl(ctx):
     apple_fragment = ctx.fragments.apple
+    cpp_fragment = ctx.fragments.cpp
     apple_toolchain = apple_common.apple_toolchain()
     cc_toolchain = find_cpp_toolchain(ctx)
 
@@ -681,12 +680,11 @@ def _xcode_swift_toolchain_impl(ctx):
     # version.
     requested_features = features_for_build_modes(
         ctx,
-        objc_fragment = ctx.fragments.objc,
-        cpp_fragment = ctx.fragments.cpp,
+        cpp_fragment = cpp_fragment,
     ) + features_from_swiftcopts(swiftcopts = ctx.fragments.swift.copts())
     requested_features.extend(ctx.features)
     requested_features.extend(
-        _features_for_bitcode_mode(apple_fragment.bitcode_mode),
+        _features_for_bitcode_mode(cpp_fragment.apple_bitcode_mode),
     )
     requested_features.extend([
         SWIFT_FEATURE_BUNDLED_XCTESTS,
@@ -715,7 +713,10 @@ def _xcode_swift_toolchain_impl(ctx):
 
     env = _xcode_env(platform = platform, xcode_config = xcode_config)
     execution_requirements = xcode_config.execution_info()
-    generated_header_rewriter = ctx.executable.generated_header_rewriter
+    generated_header_rewriter = resolve_optional_tool(
+        ctx,
+        target = ctx.attr.generated_header_rewriter,
+    )
 
     all_tool_configs = _all_tool_configs(
         custom_toolchain = custom_toolchain,
@@ -740,22 +741,13 @@ def _xcode_swift_toolchain_impl(ctx):
         xcode_config = xcode_config,
     )
 
-    # Xcode toolchains don't pass any files explicitly here because they're
-    # just available as part of the Xcode bundle, unless we're being asked to
-    # use a custom driver executable.
-    all_files = []
-    if swift_executable:
-        all_files.append(swift_executable)
-
     return [
         SwiftToolchainInfo(
             action_configs = all_action_configs,
-            all_files = depset(all_files),
             cc_toolchain_info = cc_toolchain,
             clang_implicit_deps_providers = collect_implicit_deps_providers(
                 ctx.attr.clang_implicit_deps,
             ),
-            cpu = cpu,
             feature_allowlists = [
                 target[SwiftFeatureAllowlistInfo]
                 for target in ctx.attr.feature_allowlists
@@ -766,16 +758,13 @@ def _xcode_swift_toolchain_impl(ctx):
                 )
             ),
             implicit_deps_providers = collect_implicit_deps_providers(
-                ctx.attr.implicit_deps,
+                ctx.attr.implicit_deps + ctx.attr.clang_implicit_deps,
                 additional_cc_infos = [swift_linkopts_providers.cc_info],
                 additional_objc_infos = [swift_linkopts_providers.objc_info],
             ),
             linker_supports_filelist = True,
-            object_format = "macho",
             requested_features = requested_features,
-            supports_objc_interop = True,
             swift_worker = ctx.executable._worker,
-            system_name = "darwin",
             test_configuration = struct(
                 env = env,
                 execution_requirements = execution_requirements,
@@ -795,7 +784,8 @@ xcode_swift_toolchain = rule(
                 doc = """\
 A list of labels to library targets that should be unconditionally added as
 implicit dependencies of any explicit C/Objective-C module compiled by the Swift
-toolchain.
+toolchain and also as implicit dependencies of any Swift modules compiled by
+the Swift toolchain.
 
 Despite being C/Objective-C modules, the targets specified by this attribute
 must propagate the `SwiftInfo` provider because the Swift build rules use that

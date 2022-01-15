@@ -173,13 +173,11 @@ def _swift_library_impl(ctx):
     module_context, cc_compilation_outputs, other_compilation_outputs = swift_common.compile(
         actions = ctx.actions,
         additional_inputs = additional_inputs,
-        bin_dir = ctx.bin_dir,
         copts = _maybe_parse_as_library_copts(srcs) + copts,
         defines = ctx.attr.defines,
         deps = deps,
         feature_configuration = feature_configuration,
         generated_header_name = generated_header_name,
-        genfiles_dir = ctx.genfiles_dir,
         module_name = module_name,
         private_deps = private_deps,
         srcs = srcs,
@@ -258,24 +256,20 @@ def _swift_library_impl(ctx):
         ),
     ]
 
-    # Propagate an `objc` provider if the toolchain supports Objective-C
-    # interop, which allows `objc_library` targets to import `swift_library`
-    # targets.
-    if swift_toolchain.supports_objc_interop:
-        providers.append(new_objc_provider(
-            additional_link_inputs = additional_inputs,
-            additional_objc_infos = implicit_deps_providers.objc_infos,
-            alwayslink = ctx.attr.alwayslink,
-            # We must include private_deps here because some of the information
-            # propagated here is related to linking.
-            # TODO(allevato): This means we can't yet completely avoid
-            # propagating headers/module maps from impl-only Obj-C dependencies.
-            deps = deps + private_deps,
-            feature_configuration = feature_configuration,
-            module_context = module_context,
-            libraries_to_link = [linking_output.library_to_link],
-            user_link_flags = linkopts,
-        ))
+    # Propagate an `apple_common.Objc` provider with linking info about the
+    # library so that linking with Apple Starlark APIs/rules works correctly.
+    # TODO(b/171413861): This can be removed when the Obj-C rules are migrated
+    # to use `CcLinkingContext`.
+    providers.append(new_objc_provider(
+        additional_link_inputs = additional_inputs,
+        additional_objc_infos = implicit_deps_providers.objc_infos,
+        alwayslink = ctx.attr.alwayslink,
+        deps = deps + private_deps,
+        feature_configuration = feature_configuration,
+        module_context = module_context,
+        libraries_to_link = [linking_output.library_to_link],
+        user_link_flags = linkopts,
+    ))
 
     return providers
 

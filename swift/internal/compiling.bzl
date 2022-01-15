@@ -14,7 +14,6 @@
 
 """Implementation of compilation logic for Swift."""
 
-load("@bazel_skylib//lib:collections.bzl", "collections")
 load("@bazel_skylib//lib:partial.bzl", "partial")
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_skylib//lib:sets.bzl", "sets")
@@ -53,6 +52,7 @@ load(
     "SWIFT_FEATURE_OPT",
     "SWIFT_FEATURE_OPT_USES_OSIZE",
     "SWIFT_FEATURE_OPT_USES_WMO",
+    "SWIFT_FEATURE_REWRITE_GENERATED_HEADER",
     "SWIFT_FEATURE_SPLIT_DERIVED_FILES_GENERATION",
     "SWIFT_FEATURE_SUPPORTS_LIBRARY_EVOLUTION",
     "SWIFT_FEATURE_SUPPORTS_SYSTEM_MODULE_FLAG",
@@ -60,12 +60,18 @@ load(
     "SWIFT_FEATURE_USE_C_MODULES",
     "SWIFT_FEATURE_USE_GLOBAL_INDEX_STORE",
     "SWIFT_FEATURE_USE_GLOBAL_MODULE_CACHE",
+    "SWIFT_FEATURE_USE_OLD_DRIVER",
     "SWIFT_FEATURE_USE_PCH_OUTPUT_DIR",
     "SWIFT_FEATURE_VFSOVERLAY",
     "SWIFT_FEATURE__NUM_THREADS_0_IN_SWIFTCOPTS",
     "SWIFT_FEATURE__WMO_IN_SWIFTCOPTS",
 )
-load(":features.bzl", "are_all_features_enabled", "is_feature_enabled")
+load(
+    ":features.bzl",
+    "are_all_features_enabled",
+    "get_cc_feature_configuration",
+    "is_feature_enabled",
+)
 load(":module_maps.bzl", "write_module_map")
 load(
     ":providers.bzl",
@@ -129,8 +135,25 @@ def compile_action_configs(
         The list of action configs needed to perform compilation.
     """
 
-    #### Flags that control compilation outputs
+    #### Flags that control the driver
     action_configs = [
+        # Use the legacy driver if requested.
+        swift_toolchain_config.action_config(
+            actions = [
+                swift_action_names.COMPILE,
+                swift_action_names.DERIVE_FILES,
+                swift_action_names.PRECOMPILE_C_MODULE,
+                swift_action_names.DUMP_AST,
+            ],
+            configurators = [
+                swift_toolchain_config.add_arg("-disallow-use-new-driver"),
+            ],
+            features = [SWIFT_FEATURE_USE_OLD_DRIVER],
+        ),
+    ]
+
+    #### Flags that control compilation outputs
+    action_configs += [
         # Emit object file(s).
         swift_toolchain_config.action_config(
             actions = [swift_action_names.COMPILE],
@@ -254,25 +277,24 @@ def compile_action_configs(
         ),
     ]
 
-    # TODO: Enable once bazel supports nested functions
-    # if generated_header_rewriter:
-    #     # Only add the generated header rewriter to the command line only if the
-    #     # toolchain provides one, the relevant feature is requested, and the
-    #     # particular compilation action is generating a header.
-    #     def generated_header_rewriter_configurator(prerequisites, args):
-    #         if prerequisites.generated_header_file:
-    #             args.add(
-    #                 generated_header_rewriter,
-    #                 format = "-Xwrapped-swift=-generated-header-rewriter=%s",
-    #             )
+    if generated_header_rewriter:
+        # Only add the generated header rewriter to the command line only if the
+        # toolchain provides one, the relevant feature is requested, and the
+        # particular compilation action is generating a header.
+        def generated_header_rewriter_configurator(prerequisites, args):
+            if prerequisites.generated_header_file:
+                args.add(
+                    generated_header_rewriter,
+                    format = "-Xwrapped-swift=-generated-header-rewriter=%s",
+                )
 
-    #     action_configs.append(
-    #         swift_toolchain_config.action_config(
-    #             actions = [swift_action_names.COMPILE],
-    #             configurators = [generated_header_rewriter_configurator],
-    #             features = [SWIFT_FEATURE_REWRITE_GENERATED_HEADER],
-    #         ),
-    #     )
+        action_configs.append(
+            swift_toolchain_config.action_config(
+                actions = [swift_action_names.COMPILE],
+                configurators = [generated_header_rewriter_configurator],
+                features = [SWIFT_FEATURE_REWRITE_GENERATED_HEADER],
+            ),
+        )
 
     #### Compilation-mode-related flags
     #
@@ -704,25 +726,32 @@ def compile_action_configs(
     ])
 
     #### Search paths for framework dependencies
-    action_configs.append(
+    action_configs.extend([
         swift_toolchain_config.action_config(
             actions = [
                 swift_action_names.COMPILE,
                 swift_action_names.DERIVE_FILES,
-                swift_action_names.PRECOMPILE_C_MODULE,
                 swift_action_names.DUMP_AST,
             ],
-            configurators = [_framework_search_paths_configurator],
-        ),
-    )
-    action_configs.append(
-        swift_toolchain_config.action_config(
-            actions = [
-                swift_action_names.PRECOMPILE_C_MODULE,
+            configurators = [
+                lambda prereqs, args: _framework_search_paths_configurator(
+                    prereqs,
+                    args,
+                    is_swift = True,
+                ),
             ],
-            configurators = [_pcm_additional_framework_search_paths_configurator],
         ),
-    )
+        swift_toolchain_config.action_config(
+            actions = [swift_action_names.PRECOMPILE_C_MODULE],
+            configurators = [
+                lambda prereqs, args: _framework_search_paths_configurator(
+                    prereqs,
+                    args,
+                    is_swift = False,
+                ),
+            ],
+        ),
+    ])
 
     #### Other ClangImporter flags
     action_configs.extend([
@@ -901,15 +930,6 @@ def compile_action_configs(
             ],
             configurators = [_conditional_compilation_flag_configurator],
         ),
-
-        # Disable auto-linking for prebuilt static frameworks.
-        swift_toolchain_config.action_config(
-            actions = [
-                swift_action_names.COMPILE,
-                swift_action_names.DERIVE_FILES,
-            ],
-            configurators = [_static_frameworks_disable_autolink_configurator],
-        ),
     ]
 
     # NOTE: The positions of these action configs in the list are important,
@@ -938,11 +958,9 @@ def compile_action_configs(
                     swift_action_names.DUMP_AST,
                 ],
                 configurators = [
-                    # TODO(#568): Switch to using lambda when the minimum
-                    # supported Bazel version by rules_swift supports it.
-                    partial.make(
-                        _additional_objc_copts_configurator,
+                    lambda _, args: args.add_all(
                         additional_objc_copts,
+                        before_each = "-Xcc",
                     ),
                 ],
             ),
@@ -959,12 +977,7 @@ def compile_action_configs(
                     swift_action_names.DUMP_AST,
                 ],
                 configurators = [
-                    # TODO(#568): Switch to using lambda when the minimum
-                    # supported Bazel version by rules_swift supports it.
-                    partial.make(
-                        _additional_swiftc_copts_configurator,
-                        additional_swiftc_copts,
-                    ),
+                    lambda _, args: args.add_all(additional_swiftc_copts),
                 ],
             ),
         )
@@ -1097,7 +1110,7 @@ def _clang_search_paths_configurator(prerequisites, args):
     """Adds Clang search paths to the command line."""
     args.add_all(
         depset(transitive = [
-            prerequisites.cc_info.compilation_context.includes,
+            prerequisites.cc_compilation_context.includes,
             # TODO(b/146575101): Replace with `objc_info.include` once this bug
             # is fixed. See `_merge_target_providers` below for more details.
             prerequisites.objc_include_paths_workaround,
@@ -1126,7 +1139,7 @@ def _clang_search_paths_configurator(prerequisites, args):
         depset(
             direct_quote_includes,
             transitive = [
-                prerequisites.cc_info.compilation_context.quote_includes,
+                prerequisites.cc_compilation_context.quote_includes,
             ],
         ),
         before_each = "-Xcc",
@@ -1134,7 +1147,7 @@ def _clang_search_paths_configurator(prerequisites, args):
     )
 
     args.add_all(
-        prerequisites.cc_info.compilation_context.system_includes,
+        prerequisites.cc_compilation_context.system_includes,
         map_each = _filter_out_unsupported_include_paths,
         before_each = "-Xcc",
         format_each = "-isystem%s",
@@ -1143,12 +1156,12 @@ def _clang_search_paths_configurator(prerequisites, args):
 def _dependencies_clang_defines_configurator(prerequisites, args):
     """Adds C/C++ dependencies' preprocessor defines to the command line."""
     all_clang_defines = depset(transitive = [
-        prerequisites.cc_info.compilation_context.defines,
+        prerequisites.cc_compilation_context.defines,
     ])
     args.add_all(all_clang_defines, before_each = "-Xcc", format_each = "-D%s")
 
 def _collect_clang_module_inputs(
-        cc_info,
+        cc_compilation_context,
         is_swift,
         modules,
         objc_info,
@@ -1156,8 +1169,9 @@ def _collect_clang_module_inputs(
     """Collects Clang module-related inputs to pass to an action.
 
     Args:
-        cc_info: The `CcInfo` provider of the target being compiled. The direct
-            headers of this provider will be collected as inputs.
+        cc_compilation_context: The `CcCompilationContext` of the target being
+            compiled. The direct headers of this provider will be collected as
+            inputs.
         is_swift: If True, this is a Swift compilation; otherwise, it is a
             Clang module compilation.
         modules: A list of module structures (as returned by
@@ -1179,9 +1193,9 @@ def _collect_clang_module_inputs(
     direct_inputs = []
     transitive_inputs = []
 
-    if cc_info:
-        # The headers stored in the `cc_info` argument's compilation context
-        # differ depending on the kind of action we're invoking:
+    if cc_compilation_context:
+        # The headers stored in the compilation context differ depending on the
+        # kind of action we're invoking:
         if (is_swift and not prefer_precompiled_modules) or not is_swift:
             # If this is a `SwiftCompile` with explicit modules disabled, the
             # `headers` field is an already-computed set of the transitive
@@ -1200,11 +1214,11 @@ def _collect_clang_module_inputs(
             # module's headers include those. This will likely over-estimate the
             # needed inputs, but we can't do better without include scanning in
             # Starlark.
-            transitive_inputs.append(cc_info.compilation_context.headers)
+            transitive_inputs.append(cc_compilation_context.headers)
 
     # Some rules still use the `umbrella_header` field to propagate a header
-    # that they don't also include in `CcInfo.compilation_context.headers`, so
-    # we also need to pull these in for the time being.
+    # that they don't also include in `cc_compilation_context.headers`, so we
+    # also need to pull these in for the time being.
     # TODO(b/142867898): This can be removed once the Swift rules start
     # generating its own module map for these targets.
     if objc_info:
@@ -1316,7 +1330,7 @@ def _dependencies_clang_modulemaps_configurator(prerequisites, args):
     )
 
     return _collect_clang_module_inputs(
-        cc_info = prerequisites.cc_info,
+        cc_compilation_context = prerequisites.cc_compilation_context,
         is_swift = prerequisites.is_swift,
         modules = modules,
         objc_info = prerequisites.objc_info,
@@ -1342,51 +1356,30 @@ def _dependencies_clang_modules_configurator(prerequisites, args):
     )
 
     return _collect_clang_module_inputs(
-        cc_info = prerequisites.cc_info,
+        cc_compilation_context = prerequisites.cc_compilation_context,
         is_swift = prerequisites.is_swift,
         modules = modules,
         objc_info = prerequisites.objc_info,
         prefer_precompiled_modules = True,
     )
 
-def _framework_search_paths_configurator(prerequisites, args):
+def _framework_search_paths_configurator(prerequisites, args, is_swift):
     """Add search paths for prebuilt frameworks to the command line."""
+
+    # Swift doesn't automatically propagate its `-F` flag to ClangImporter, so
+    # we add it manually with `-Xcc` below (for both regular compilations, in
+    # case they're using implicit modules, and Clang module compilations). We
+    # don't need to add regular `-F` if this is a Clang module compilation,
+    # though, since it won't be used.
+    if is_swift:
+        args.add_all(
+            prerequisites.cc_compilation_context.framework_includes,
+            format_each = "-F%s",
+        )
     args.add_all(
-        prerequisites.cc_info.compilation_context.framework_includes,
+        prerequisites.cc_compilation_context.framework_includes,
         format_each = "-F%s",
-    )
-
-def _pcm_additional_framework_search_paths_configurator(prerequisites, args):
-    """Add search paths for prebuilt frameworks to the command line for pcms.
-
-    This is needed since swiftc doesn't pass the framework search paths to
-    clang, causing issues with framework style imports in headers.
-    """
-    args.add_all(
-        prerequisites.cc_info.compilation_context.framework_includes,
         before_each = "-Xcc",
-        format_each = "-F%s",
-    )
-
-def _static_frameworks_disable_autolink_configurator(prerequisites, args):
-    """Add flags to disable auto-linking for static prebuilt frameworks.
-
-    This disables the `LC_LINKER_OPTION` load commands for auto-linking when
-    importing a static framework. This is needed to correctly deduplicate static
-    frameworks from being linked into test binaries when it is also linked into
-    the application binary.
-    """
-
-    # TODO(b/143301479): This can be removed if we can disable auto-linking
-    # universally in the linker invocation. For Clang, we already pass
-    # `-fno-autolink`, but Swift doesn't have a similar option (to stop emitting
-    # `LC_LINKER_OPTION` load commands unconditionally). However, ld64 has an
-    # undocumented `-ignore_auto_link` flag that we could use. In either case,
-    # though, this would likely also disable auto-linking for system frameworks,
-    # so we would need to model those as explicit dependencies first.
-    args.add_all(
-        prerequisites.objc_info.static_framework_names,
-        map_each = _disable_autolink_framework_copts,
     )
 
 def _dependencies_swiftmodules_configurator(prerequisites, args):
@@ -1532,7 +1525,7 @@ def _conditional_compilation_flag_configurator(prerequisites, args):
         transitive = [
             # Take any Swift-compatible defines from Objective-C dependencies
             # and define them for Swift.
-            prerequisites.cc_info.compilation_context.defines,
+            prerequisites.cc_compilation_context.defines,
         ],
     )
     args.add_all(
@@ -1552,19 +1545,6 @@ def _additional_inputs_configurator(prerequisites, args):
     return swift_toolchain_config.config_result(
         inputs = prerequisites.additional_inputs,
     )
-
-def _additional_objc_copts_configurator(additional_objc_copts, prerequisites, args):
-    """Adds additional Objective-C compiler flags to the command line."""
-    _unused = [prerequisites]
-    args.add_all(
-        additional_objc_copts,
-        before_each = "-Xcc",
-    )
-
-def _additional_swiftc_copts_configurator(additional_swiftc_copts, prerequisites, args):
-    """Adds additional Swift compiler flags to the command line."""
-    _unused = [prerequisites]
-    args.add_all(additional_swiftc_copts)
 
 def _module_name_safe(string):
     """Returns a transformation of `string` that is safe for module names."""
@@ -1641,45 +1621,25 @@ def derive_module_name(*args):
 def compile(
         *,
         actions,
-        feature_configuration,
-        module_name,
-        srcs,
-        swift_toolchain,
-        target_name,
-        workspace_name,
         additional_inputs = [],
-        bin_dir = None,
         copts = [],
         defines = [],
         deps = [],
+        feature_configuration,
         generated_header_name = None,
-        genfiles_dir = None,
-        private_deps = []):
+        module_name,
+        private_deps = [],
+        srcs,
+        swift_toolchain,
+        target_name,
+        workspace_name):
     """Compiles a Swift module.
 
     Args:
         actions: The context's `actions` object.
-        feature_configuration: A feature configuration obtained from
-            `swift_common.configure_features`.
-        module_name: The name of the Swift module being compiled. This must be
-            present and valid; use `swift_common.derive_module_name` to generate
-            a default from the target's label if needed.
-        srcs: The Swift source files to compile.
-        swift_toolchain: The `SwiftToolchainInfo` provider of the toolchain.
-        target_name: The name of the target for which the code is being
-            compiled, which is used to determine unique file paths for the
-            outputs.
-        workspace_name: The name of the workspace for which the code is being
-             compiled, which is used to determine unique file paths for some
-             outputs.
         additional_inputs: A list of `File`s representing additional input files
             that need to be passed to the Swift compile action because they are
             referenced by compiler flags.
-        bin_dir: The Bazel `*-bin` directory root. If provided, its path is used
-            to store the cache for modules precompiled by Swift's ClangImporter,
-            and it is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            includes of generated headers from that location.
         copts: A list of compiler flags that apply to the target being built.
             These flags, along with those from Bazel's Swift configuration
             fragment (i.e., `--swiftcopt` command line flags) are scanned to
@@ -1691,52 +1651,45 @@ def compile(
             compiled and the Clang module for the generated header. These
             targets must propagate one of the following providers: `CcInfo`,
             `SwiftInfo`, or `apple_common.Objc`.
+        feature_configuration: A feature configuration obtained from
+            `swift_common.configure_features`.
         generated_header_name: The name of the Objective-C generated header that
             should be generated for this module. If omitted, no header will be
             generated.
-        genfiles_dir: The Bazel `*-genfiles` directory root. If provided, its
-            path is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            inclusions of generated headers from that location.
+        module_name: The name of the Swift module being compiled. This must be
+            present and valid; use `swift_common.derive_module_name` to generate
+            a default from the target's label if needed.
         private_deps: Private (implementation-only) dependencies of the target
             being compiled. These are only used as dependencies of the Swift
             module, not of the Clang module for the generated header. These
             targets must propagate one of the following providers: `CcInfo`,
             `SwiftInfo`, or `apple_common.Objc`.
+        srcs: The Swift source files to compile.
+        swift_toolchain: The `SwiftToolchainInfo` provider of the toolchain.
+        target_name: The name of the target for which the code is being
+            compiled, which is used to determine unique file paths for the
+            outputs.
+        workspace_name: The name of the workspace for which the code is being
+             compiled, which is used to determine unique file paths for some
+             outputs.
 
     Returns:
-        A `struct` containing the following fields:
+        A tuple containing three elements:
 
-        *   `generated_header`: A `File` representing the Objective-C header
-            that was generated for the compiled module. If no header was
-            generated, this field will be None.
-        *   `generated_header_module_map`: A `File` representing the module map
-            that was generated to correspond to the generated Objective-C
-            header. If no module map was generated, this field will be None.
-        *   `indexstore`: A `File` representing the directory that contains the
-            index store data generated by the compiler if index-while-building
-            is enabled. May be None if no indexing was requested.
-        *   `linker_flags`: A list of strings representing additional flags that
-            should be passed to the linker when linking these objects into a
-            binary. If there are none, this field will always be an empty list,
-            never None.
-        *   `linker_inputs`: A list of `File`s representing additional input
-            files (such as those referenced in `linker_flags`) that need to be
-            available to the link action when linking these objects into a
-            binary. If there are none, this field will always be an empty list,
-            never None.
-        *   `object_files`: A list of `.o` files that were produced by the
-            compiler.
-        *   `precompiled_module`: A `File` representing the explicit module
-            (`.pcm`) of the Clang module for the generated header, or `None` if
-            no explicit module was generated.
-        *   `swiftdoc`: The `.swiftdoc` file that was produced by the compiler.
-        *   `swiftinterface`: The `.swiftinterface` file that was produced by
-            the compiler. If no interface file was produced (because the
-            toolchain does not support them or it was not requested), this field
-            will be None.
-        *   `swiftmodule`: The `.swiftmodule` file that was produced by the
-            compiler.
+        1.  A Swift module context (as returned by `swift_common.create_module`)
+            that contains the Swift (and potentially C/Objective-C) compilation
+            prerequisites of the compiled module. This should typically be
+            propagated by a `SwiftInfo` provider of the calling rule.
+        2.  A `CcCompilationOutputs` object (as returned by
+            `cc_common.create_compilation_outputs`) that contains the compiled
+            object files.
+        3.  A struct containing:
+            *   `ast_files`: A list of `File`s output from the `DUMP_AST`
+                action.
+            *   `indexstore`: A `File` representing the directory that contains
+                the index store data generated by the compiler if
+                index-while-building is enabled. May be None if no indexing was
+                requested.
     """
 
     # Collect the `SwiftInfo` providers that represent the dependencies of the
@@ -1803,7 +1756,6 @@ def compile(
     # the full set of values and inputs through a single accessor.
     merged_providers = _merge_targets_providers(
         implicit_deps_providers = swift_toolchain.implicit_deps_providers,
-        supports_objc_interop = swift_toolchain.supports_objc_interop,
         targets = deps + private_deps,
     )
 
@@ -1858,10 +1810,10 @@ def compile(
 
     prerequisites = struct(
         additional_inputs = _additional_inputs,
-        bin_dir = bin_dir,
-        cc_info = merged_providers.cc_info,
+        bin_dir = feature_configuration._bin_dir,
+        cc_compilation_context = merged_providers.cc_info.compilation_context,
         defines = sets.to_list(defines_set),
-        genfiles_dir = genfiles_dir,
+        genfiles_dir = feature_configuration._genfiles_dir,
         is_swift = True,
         module_name = module_name,
         objc_include_paths_workaround = (
@@ -1886,9 +1838,7 @@ def compile(
             feature_configuration = feature_configuration,
             outputs = all_derived_outputs,
             prerequisites = prerequisites,
-            progress_message = (
-                "Generating derived files for Swift module {}".format(module_name)
-            ),
+            progress_message = "Generating derived files for Swift module %{label}",
             swift_toolchain = swift_toolchain,
         )
 
@@ -1898,7 +1848,7 @@ def compile(
         feature_configuration = feature_configuration,
         outputs = all_compile_outputs,
         prerequisites = prerequisites,
-        progress_message = "Compiling Swift module {}".format(module_name),
+        progress_message = "Compiling Swift module %{label}",
         swift_toolchain = swift_toolchain,
     )
 
@@ -1914,7 +1864,7 @@ def compile(
         feature_configuration = feature_configuration,
         outputs = compile_outputs.ast_files,
         prerequisites = prerequisites,
-        progress_message = "Dumping Swift AST for {}".format(module_name),
+        progress_message = "Dumping Swift AST for %{label}",
         swift_toolchain = swift_toolchain,
     )
 
@@ -1934,10 +1884,8 @@ def compile(
         )
         precompiled_module = _precompile_clang_module(
             actions = actions,
-            bin_dir = bin_dir,
             cc_compilation_context = compilation_context_to_compile,
             feature_configuration = feature_configuration,
-            genfiles_dir = genfiles_dir,
             is_swift_generated_header = True,
             module_map_file = compile_outputs.generated_module_map_file,
             module_name = module_name,
@@ -1948,31 +1896,18 @@ def compile(
     else:
         precompiled_module = None
 
-    if compile_outputs.generated_header_file:
-        module_headers = [compile_outputs.generated_header_file]
-    else:
-        module_headers = []
-
-    if defines or module_headers:
-        direct_cc_infos = [
-            CcInfo(compilation_context = cc_common.create_compilation_context(
-                defines = depset(defines),
-                headers = depset(module_headers),
-                includes = depset([bin_dir.path]),
-            )),
-        ]
-    else:
-        direct_cc_infos = []
-
-    compilation_context = cc_common.merge_cc_infos(
-        cc_infos = [dep[CcInfo] for dep in deps if CcInfo in dep],
-        direct_cc_infos = direct_cc_infos,
-    ).compilation_context
-
     module_context = create_module(
         name = module_name,
         clang = create_clang_module(
-            compilation_context = compilation_context,
+            compilation_context = _create_cc_compilation_context(
+                actions = actions,
+                defines = defines,
+                deps = deps,
+                feature_configuration = feature_configuration,
+                public_hdrs = compact([compile_outputs.generated_header_file]),
+                swift_toolchain = swift_toolchain,
+                target_name = target_name,
+            ),
             module_map = compile_outputs.generated_module_map_file,
             precompiled_module = precompiled_module,
         ),
@@ -2007,8 +1942,6 @@ def precompile_clang_module(
         module_name,
         swift_toolchain,
         target_name,
-        bin_dir = None,
-        genfiles_dir = None,
         swift_infos = []):
     """Precompiles an explicit Clang module that is compatible with Swift.
 
@@ -2033,15 +1966,6 @@ def precompile_clang_module(
         target_name: The name of the target for which the code is being
             compiled, which is used to determine unique file paths for the
             outputs.
-        bin_dir: The Bazel `*-bin` directory root. If provided, its path is used
-            to store the cache for modules precompiled by Swift's ClangImporter,
-            and it is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            includes of generated headers from that location.
-        genfiles_dir: The Bazel `*-genfiles` directory root. If provided, its
-            path is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            inclusions of generated headers from that location.
         swift_infos: A list of `SwiftInfo` providers representing dependencies
             required to compile this module.
 
@@ -2051,10 +1975,8 @@ def precompile_clang_module(
     """
     return _precompile_clang_module(
         actions = actions,
-        bin_dir = bin_dir,
         cc_compilation_context = cc_compilation_context,
         feature_configuration = feature_configuration,
-        genfiles_dir = genfiles_dir,
         is_swift_generated_header = False,
         module_map_file = module_map_file,
         module_name = module_name,
@@ -2071,11 +1993,9 @@ def _precompile_clang_module(
         is_swift_generated_header,
         module_map_file,
         module_name,
+        swift_infos = [],
         swift_toolchain,
-        target_name,
-        bin_dir = None,
-        genfiles_dir = None,
-        swift_infos = []):
+        target_name):
     """Precompiles an explicit Clang module that is compatible with Swift.
 
     Args:
@@ -2097,21 +2017,12 @@ def _precompile_clang_module(
             to be compiled.
         module_name: The name of the top-level module in the module map that
             will be compiled.
+        swift_infos: A list of `SwiftInfo` providers representing dependencies
+            required to compile this module.
         swift_toolchain: The `SwiftToolchainInfo` provider of the toolchain.
         target_name: The name of the target for which the code is being
             compiled, which is used to determine unique file paths for the
             outputs.
-        bin_dir: The Bazel `*-bin` directory root. If provided, its path is used
-            to store the cache for modules precompiled by Swift's ClangImporter,
-            and it is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            includes of generated headers from that location.
-        genfiles_dir: The Bazel `*-genfiles` directory root. If provided, its
-            path is added to ClangImporter's header search paths for
-            compatibility with Bazel's C++ and Objective-C rules which support
-            inclusions of generated headers from that location.
-        swift_infos: A list of `SwiftInfo` providers representing dependencies
-            required to compile this module.
 
     Returns:
         A `File` representing the precompiled module (`.pcm`) file, or `None` if
@@ -2141,6 +2052,12 @@ def _precompile_clang_module(
         implicit_swift_infos = (
             swift_toolchain.clang_implicit_deps_providers.swift_infos
         )
+        cc_compilation_context = cc_common.merge_cc_infos(
+            cc_infos = swift_toolchain.clang_implicit_deps_providers.cc_infos,
+            direct_cc_infos = [
+                CcInfo(compilation_context = cc_compilation_context),
+            ],
+        ).compilation_context
     else:
         implicit_swift_infos = []
 
@@ -2155,9 +2072,9 @@ def _precompile_clang_module(
         transitive_modules = []
 
     prerequisites = struct(
-        bin_dir = bin_dir,
-        cc_info = CcInfo(compilation_context = cc_compilation_context),
-        genfiles_dir = genfiles_dir,
+        bin_dir = feature_configuration._bin_dir,
+        cc_compilation_context = cc_compilation_context,
+        genfiles_dir = feature_configuration._genfiles_dir,
         is_swift = False,
         is_swift_generated_header = is_swift_generated_header,
         module_name = module_name,
@@ -2174,11 +2091,91 @@ def _precompile_clang_module(
         feature_configuration = feature_configuration,
         outputs = [precompiled_module],
         prerequisites = prerequisites,
-        progress_message = "Precompiling C module {}".format(module_name),
+        progress_message = "Precompiling C module %{label}",
         swift_toolchain = swift_toolchain,
     )
 
     return precompiled_module
+
+def _create_cc_compilation_context(
+        *,
+        actions,
+        defines,
+        deps,
+        feature_configuration,
+        public_hdrs,
+        swift_toolchain,
+        target_name):
+    """Creates a `CcCompilationContext` to propagate for a Swift module.
+
+    The returned compilation context contains the generated Objective-C header
+    for the module (if any), along with any preprocessor defines based on
+    compilation settings passed to the Swift compilation.
+
+    Args:
+        actions: The context's `actions` object.
+        defines: Symbols that should be defined by passing `-D` to the compiler.
+        deps: Non-private dependencies of the target being compiled. These
+            targets are used as dependencies of both the Swift module being
+            compiled and the Clang module for the generated header. These
+            targets must propagate one of the following providers: `CcInfo`,
+            `SwiftInfo`, or `apple_common.Objc`.
+        feature_configuration: A feature configuration obtained from
+            `swift_common.configure_features`.
+        public_hdrs: Public headers that should be propagated by the new
+            compilation context (for example, the module's generated header).
+        swift_toolchain: The `SwiftToolchainInfo` provider of the toolchain.
+        target_name: The name of the target for which the code is being
+            compiled, which is used to determine unique file paths for the
+            outputs.
+
+    Returns:
+        The `CcCompilationContext` that should be propagated by the calling
+        target.
+    """
+
+    # If we are propagating headers, call `cc_common.compile` to get the
+    # compilation context instead of creating it directly. This gives the
+    # C++/Objective-C logic in Bazel an opportunity to register its own actions
+    # relevant to the headers, like creating a layering check module map.
+    # Without this, Swift targets won't be treated as `use`d modules when
+    # generating the layering check module map for an `objc_library`, and those
+    # layering checks will fail when the Objective-C code tries to import the
+    # `swift_library`'s headers.
+    if public_hdrs:
+        compilation_context, _ = cc_common.compile(
+            actions = actions,
+            cc_toolchain = swift_toolchain.cc_toolchain_info,
+            compilation_contexts = [
+                dep[CcInfo].compilation_context
+                for dep in deps
+                if CcInfo in dep
+            ],
+            defines = defines,
+            feature_configuration = get_cc_feature_configuration(
+                feature_configuration = feature_configuration,
+            ),
+            name = target_name,
+            public_hdrs = public_hdrs,
+        )
+        return compilation_context
+
+    # If there were no headers, create the compilation context manually. This
+    # avoids having Bazel create an action that results in an empty module map
+    # that won't contribute meaningfully to layering checks anyway.
+    if defines:
+        direct_cc_infos = [
+            CcInfo(compilation_context = cc_common.create_compilation_context(
+                defines = depset(defines),
+            )),
+        ]
+    else:
+        direct_cc_infos = []
+
+    return cc_common.merge_cc_infos(
+        cc_infos = [dep[CcInfo] for dep in deps if CcInfo in dep],
+        direct_cc_infos = direct_cc_infos,
+    ).compilation_context
 
 def _declare_compile_outputs(
         *,
@@ -2545,10 +2542,7 @@ def _declare_validated_generated_header(actions, generated_header_name):
 
     return actions.declare_file(generated_header_name)
 
-def _merge_targets_providers(
-        implicit_deps_providers,
-        supports_objc_interop,
-        targets):
+def _merge_targets_providers(implicit_deps_providers, targets):
     """Merges the compilation-related providers for the given targets.
 
     This function merges the `CcInfo`, `SwiftInfo`, and `apple_common.Objc`
@@ -2560,10 +2554,6 @@ def _merge_targets_providers(
     Args:
         implicit_deps_providers: The implicit deps providers `struct` from the
             Swift toolchain.
-        supports_objc_interop: `True` if the current toolchain supports
-            Objective-C interop and the `apple_common.Objc` providers should
-            also be used to determine compilation flags and inputs. If `False`,
-            any `apple_common.Objc` providers in the targets will be ignored.
         targets: The targets whose providers should be merged.
 
     Returns:
@@ -2592,8 +2582,7 @@ def _merge_targets_providers(
             cc_infos.append(target[CcInfo])
         if SwiftInfo in target:
             swift_infos.append(target[SwiftInfo])
-
-        if apple_common.Objc in target and supports_objc_interop:
+        if apple_common.Objc in target:
             objc_infos.append(target[apple_common.Objc])
             objc_include_paths_workaround_depsets.append(
                 target[apple_common.Objc].strict_include,
@@ -2669,8 +2658,8 @@ def new_objc_provider(
         library = library_to_link.static_library
         if library:
             direct_libraries.append(library)
-        if alwayslink:
-            force_load_libraries.append(library)
+            if alwayslink:
+                force_load_libraries.append(library)
 
     if feature_configuration and should_embed_swiftmodule_for_debugging(
         feature_configuration = feature_configuration,
@@ -2687,9 +2676,6 @@ def new_objc_provider(
         force_load_library = depset(
             force_load_libraries,
             order = "topological",
-        ),
-        header = depset(
-            module_context.clang.compilation_context.direct_headers,
         ),
         library = depset(
             direct_libraries,
@@ -2787,24 +2773,6 @@ def _swift_module_search_path_map_fn(module):
 def _filter_out_unsupported_include_paths(path):
     """Stub for a filter function only used internally."""
     return path
-
-def _disable_autolink_framework_copts(framework_name):
-    """A `map_each` helper that disables autolinking for the given framework.
-
-    Args:
-        framework_name: The name of the framework.
-
-    Returns:
-        The list of `swiftc` flags needed to disable autolinking for the given
-        framework.
-    """
-    return collections.before_each(
-        "-Xfrontend",
-        [
-            "-disable-autolink-framework",
-            framework_name,
-        ],
-    )
 
 def _find_num_threads_flag_value(user_compile_flags):
     """Finds the value of the `-num-threads` flag.

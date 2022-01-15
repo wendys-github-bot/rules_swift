@@ -214,7 +214,7 @@ def _register_pbswift_generate_action(
         ),
         mnemonic = "ProtocGenSwift",
         outputs = generated_files,
-        progress_message = "Generating Swift sources for {}".format(label),
+        progress_message = "Generating Swift sources for %{label}",
         tools = [
             mkdir_and_run,
             protoc_executable,
@@ -408,11 +408,9 @@ def _swift_protoc_gen_aspect_impl(target, aspect_ctx):
 
         module_context, cc_compilation_outputs, other_compilation_outputs = swift_common.compile(
             actions = aspect_ctx.actions,
-            bin_dir = aspect_ctx.bin_dir,
             copts = ["-parse-as-library"],
             deps = proto_deps + support_deps,
             feature_configuration = feature_configuration,
-            genfiles_dir = aspect_ctx.genfiles_dir,
             module_name = module_name,
             srcs = pbswift_files,
             swift_toolchain = swift_toolchain,
@@ -458,31 +456,29 @@ def _swift_protoc_gen_aspect_impl(target, aspect_ctx):
             get_providers(support_deps, CcInfo)
         )
 
-        # Propagate an `objc` provider if the toolchain supports Objective-C
-        # interop, which ensures that the libraries get linked into
-        # `apple_binary` targets properly.
-        if swift_toolchain.supports_objc_interop:
-            objc_infos = get_providers(
-                proto_deps,
-                SwiftProtoCcInfo,
-                _extract_objc_info,
-            ) + get_providers(support_deps, apple_common.Objc)
+        # Propagate an `apple_common.Objc` provider with linking info about the
+        # library so that linking with Apple Starlark APIs/rules works
+        # correctly.
+        # TODO(b/171413861): This can be removed when the Obj-C rules are
+        # migrated to use `CcLinkingContext`.
+        objc_infos = get_providers(
+            proto_deps,
+            SwiftProtoCcInfo,
+            _extract_objc_info,
+        ) + get_providers(support_deps, apple_common.Objc)
 
-            objc_info = new_objc_provider(
-                additional_objc_infos = (
-                    objc_infos +
-                    swift_toolchain.implicit_deps_providers.objc_infos
-                ),
-                # We pass an empty list here because we already extracted the
-                # `Objc` providers from `SwiftProtoCcInfo` above.
-                deps = [],
-                feature_configuration = feature_configuration,
-                module_context = module_context,
-                libraries_to_link = [linking_output.library_to_link],
-            )
-        else:
-            includes = None
-            objc_info = None
+        objc_info = new_objc_provider(
+            additional_objc_infos = (
+                objc_infos +
+                swift_toolchain.implicit_deps_providers.objc_infos
+            ),
+            # We pass an empty list here because we already extracted the
+            # `Objc` providers from `SwiftProtoCcInfo` above.
+            deps = [],
+            feature_configuration = feature_configuration,
+            module_context = module_context,
+            libraries_to_link = [linking_output.library_to_link],
+        )
 
         cc_info = CcInfo(
             compilation_context = module_context.clang.compilation_context,
@@ -516,16 +512,13 @@ def _swift_protoc_gen_aspect_impl(target, aspect_ctx):
         # already been pulled in by a `proto_library` that had srcs.
         pbswift_files = []
 
-        if swift_toolchain.supports_objc_interop:
-            objc_info = apple_common.new_objc_provider(
-                providers = get_providers(
-                    proto_deps,
-                    SwiftProtoCcInfo,
-                    _extract_objc_info,
-                ),
-            )
-        else:
-            objc_info = None
+        objc_info = apple_common.new_objc_provider(
+            providers = get_providers(
+                proto_deps,
+                SwiftProtoCcInfo,
+                _extract_objc_info,
+            ),
+        )
 
         providers = [
             SwiftProtoCcInfo(

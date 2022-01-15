@@ -189,12 +189,10 @@ def _swift_linking_rule_impl(
         module_context, cc_compilation_outputs, other_compilation_outputs = swift_common.compile(
             actions = ctx.actions,
             additional_inputs = additional_inputs,
-            bin_dir = ctx.bin_dir,
             copts = copts,
             defines = ctx.attr.defines,
             deps = ctx.attr.deps,
             feature_configuration = feature_configuration,
-            genfiles_dir = ctx.genfiles_dir,
             module_name = module_name,
             srcs = srcs,
             swift_toolchain = swift_toolchain,
@@ -330,11 +328,10 @@ def _swift_test_impl(ctx):
         requested_features = ["static_linking_mode"],
     )
 
-    is_bundled = (swift_toolchain.supports_objc_interop and
-                  swift_common.is_enabled(
-                      feature_configuration = feature_configuration,
-                      feature_name = SWIFT_FEATURE_BUNDLED_XCTESTS,
-                  ))
+    is_bundled = swift_common.is_enabled(
+        feature_configuration = feature_configuration,
+        feature_name = SWIFT_FEATURE_BUNDLED_XCTESTS,
+    )
 
     # If we need to run the test in an .xctest bundle, the binary must have
     # Mach-O type `MH_BUNDLE` instead of `MH_EXECUTE`.

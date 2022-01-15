@@ -86,34 +86,21 @@ def compilation_context_for_explicit_module_compilation(
         dependencies (since Clang needs to find those on the file system in
         order to map them to a module).
     """
-    cc_infos = [
-        CcInfo(compilation_context = compilation_context)
-        for compilation_context in compilation_contexts
-    ]
+    all_compilation_contexts = list(compilation_contexts)
 
     for dep in deps:
         if CcInfo in dep:
-            # TODO(b/179692096): We only need to propagate the information from
-            # the compilation contexts, but we can't merge those directly; we
-            # can only merge `CcInfo` objects. So we "unwrap" the compilation
-            # context from each provider and then "rewrap" it in a new provider
-            # that lacks the linking context so that our merge operation does
-            # less work.
-            cc_infos.append(
-                CcInfo(compilation_context = dep[CcInfo].compilation_context),
-            )
+            all_compilation_contexts.append(dep[CcInfo].compilation_context)
         if apple_common.Objc in dep:
-            cc_infos.append(
-                CcInfo(
-                    compilation_context = cc_common.create_compilation_context(
-                        includes = dep[apple_common.Objc].strict_include,
-                    ),
+            all_compilation_contexts.append(
+                cc_common.create_compilation_context(
+                    includes = dep[apple_common.Objc].strict_include,
                 ),
             )
 
-    return cc_common.merge_cc_infos(
-        direct_cc_infos = cc_infos,
-    ).compilation_context
+    return cc_common.merge_compilation_contexts(
+        compilation_contexts = all_compilation_contexts,
+    )
 
 def expand_locations(ctx, values, targets = []):
     """Expands the `$(location)` placeholders in each of the given values.
@@ -303,6 +290,44 @@ def owner_relative_path(file):
         )
     else:
         return paths.relativize(file.short_path, package)
+
+def resolve_optional_tool(ctx, *, target):
+    """Resolves a tool and returns a `struct` describing its inputs.
+
+    This function uses `ctx.resolve_tools` which allows an executable and any of
+    its required runfiles to be propagated correctly across the target boundary.
+
+    Args:
+        ctx: The rule or aspect context.
+        target: The `Target` representing the tool whose inputs should be
+            resolved. This may be `None`, in which case the returned `struct`
+            will be valid but its fields will be appropriately empty.
+
+    Returns:
+        A `struct` containing three fields:
+
+        *   `executable`: The `File` representing the tool's executable (or
+            `None` if `target` was `None`).
+        *   `input_manifests`: A list of input manifests that should be passed
+            as `tool_input_manifests` when configuring the tool in the
+            toolchain (or the empty list if `target` was `None`.)
+        *   `inputs`: A `depset` of `File`s that should be passed as
+            `tool_inputs` when configuring the tool in the toolchain (or the
+            empty `depset` if `target` was `None`.)
+    """
+    if target:
+        executable = target[DefaultInfo].files_to_run.executable
+        inputs, input_manifests = ctx.resolve_tools(tools = [target])
+    else:
+        executable = None
+        input_manifests = []
+        inputs = depset()
+
+    return struct(
+        executable = executable,
+        input_manifests = input_manifests,
+        inputs = inputs,
+    )
 
 def struct_fields(s):
     """Returns a dictionary containing the fields in the struct `s`.

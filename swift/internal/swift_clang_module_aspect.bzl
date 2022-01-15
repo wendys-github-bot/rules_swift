@@ -208,13 +208,6 @@ def _tagged_target_module_name(label, tags):
             _, _, module_name = tag.partition("=")
     return module_name
 
-# TODO: Once bazel supports nested functions unify this with upstream
-# Sort dependent module names and the headers to ensure a deterministic
-# order in the output file, in the event the compilation context would ever
-# change this on us. For files, use the execution path as the sorting key.
-def _path_sorting_key(file):
-    return file.path
-
 def _generate_module_map(
         actions,
         compilation_context,
@@ -262,6 +255,12 @@ def _generate_module_map(
         actions = actions,
         target_name = target.label.name,
     )
+
+    # Sort dependent module names and the headers to ensure a deterministic
+    # order in the output file, in the event the compilation context would ever
+    # change this on us. For files, use the execution path as the sorting key.
+    def _path_sorting_key(file):
+        return file.path
 
     write_module_map(
         actions = actions,
@@ -519,10 +518,8 @@ def _handle_module(
     )
     precompiled_module = precompile_clang_module(
         actions = aspect_ctx.actions,
-        bin_dir = aspect_ctx.bin_dir,
         cc_compilation_context = compilation_context_to_compile,
         feature_configuration = feature_configuration,
-        genfiles_dir = aspect_ctx.genfiles_dir,
         module_map_file = module_map_file,
         module_name = module_name,
         swift_infos = swift_infos,
