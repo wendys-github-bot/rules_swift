@@ -120,7 +120,6 @@ def create_linking_context_from_compilation_outputs(
                 actions = actions,
                 autolink_file = autolink_file,
                 feature_configuration = feature_configuration,
-                module_name = module_context.name,
                 object_files = compilation_outputs.objects,
                 swift_toolchain = swift_toolchain,
             )
@@ -167,7 +166,7 @@ def register_link_binary_action(
         cc_feature_configuration,
         compilation_outputs,
         deps,
-        grep_includes,
+        grep_includes,  # buildifier: disable=unused-variable
         name,
         output_type,
         owner,
@@ -236,7 +235,10 @@ def register_link_binary_action(
                 "-framework",
                 objc.dynamic_framework_names.to_list(),
             ))
-            dep_link_flags.extend(static_framework_files)
+            dep_link_flags.extend([
+                file.path
+                for file in static_framework_files
+            ])
 
             linking_contexts.append(
                 cc_common.create_linking_context(
@@ -244,6 +246,7 @@ def register_link_binary_action(
                         cc_common.create_linker_input(
                             owner = owner,
                             user_link_flags = depset(dep_link_flags),
+                            additional_inputs = objc.static_framework_file,
                         ),
                     ]),
                 ),
@@ -251,7 +254,6 @@ def register_link_binary_action(
 
     linking_contexts.extend(additional_linking_contexts)
 
-    _ignore = [grep_includes]  # Silence buildifier
     return cc_common.link(
         actions = actions,
         additional_inputs = additional_inputs,

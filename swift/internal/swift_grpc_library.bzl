@@ -396,7 +396,7 @@ The kind of definitions that should be generated:
             "_protoc_gen_swiftgrpc": attr.label(
                 cfg = "exec",
                 default = Label(
-                    "@com_github_grpc_grpc_swift//:protoc-gen-swiftgrpc",
+                    "@com_github_grpc_grpc_swift//:protoc-gen-swiftgrpc_wrapper",
                 ),
                 executable = True,
             ),

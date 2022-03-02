@@ -50,6 +50,7 @@ load(
     ":providers.bzl",
     "SwiftFeatureAllowlistInfo",
     "SwiftInfo",
+    "SwiftPackageConfigurationInfo",
     "SwiftToolchainInfo",
 )
 load(
@@ -181,7 +182,6 @@ def _swift_linkopts_providers(
         apple_fragment,
         apple_toolchain,
         platform,
-        target,
         toolchain_label,
         xcode_config):
     """Returns providers containing flags that should be passed to the linker.
@@ -194,7 +194,6 @@ def _swift_linkopts_providers(
         apple_fragment: The `apple` configuration fragment.
         apple_toolchain: The `apple_common.apple_toolchain()` object.
         platform: The `apple_platform` value describing the target platform.
-        target: The target triple.
         toolchain_label: The label of the Swift toolchain that will act as the
             owner of the linker input propagating the flags.
         xcode_config: The Xcode configuration.
@@ -288,7 +287,7 @@ def _features_for_bitcode_mode(bitcode_mode):
              bitcode_mode_string,
          ))
 
-def _resource_directory_configurator(developer_dir, prerequisites, args):
+def _resource_directory_configurator(developer_dir, _prerequisites, args):
     """Configures compiler flags about the toolchain's resource directory.
 
     We must pass a resource directory explicitly if the build rules are invoked
@@ -298,7 +297,7 @@ def _resource_directory_configurator(developer_dir, prerequisites, args):
     Args:
         developer_dir: The path to Xcode's Developer directory. This argument is
             pre-bound in the partial.
-        prerequisites: The value returned by
+        _prerequisites: The value returned by
             `swift_common.action_prerequisites`.
         args: The `Args` object to which flags will be added.
     """
@@ -534,6 +533,8 @@ def _all_tool_configs(
         env = dict(env)
         env["TOOLCHAINS"] = custom_toolchain
 
+    env["SWIFT_AVOID_WARNING_USING_OLD_DRIVER"] = "1"
+
     tool_config = swift_toolchain_config.driver_tool_config(
         driver_mode = "swiftc",
         env = env,
@@ -639,7 +640,13 @@ def _xcode_swift_toolchain_impl(ctx):
     apple_toolchain = apple_common.apple_toolchain()
     cc_toolchain = find_cpp_toolchain(ctx)
 
-    cpu = apple_fragment.single_arch_cpu
+    # TODO(https://github.com/bazelbuild/bazel/issues/14291): Always use the
+    # value from ctx.fragments.apple.single_arch_cpu
+    if cc_toolchain.cpu.startswith("darwin_"):
+        cpu = cc_toolchain.cpu[len("darwin_"):]
+    else:
+        cpu = apple_fragment.single_arch_cpu
+
     platform = apple_fragment.single_arch_platform
     xcode_config = ctx.attr._xcode_config[apple_common.XcodeVersionConfig]
 
@@ -652,7 +659,6 @@ def _xcode_swift_toolchain_impl(ctx):
         apple_fragment,
         apple_toolchain,
         platform,
-        target,
         ctx.label,
         xcode_config,
     )
@@ -763,6 +769,10 @@ def _xcode_swift_toolchain_impl(ctx):
                 additional_objc_infos = [swift_linkopts_providers.objc_info],
             ),
             linker_supports_filelist = True,
+            package_configurations = [
+                target[SwiftPackageConfigurationInfo]
+                for target in ctx.attr.package_configurations
+            ],
             requested_features = requested_features,
             swift_worker = ctx.executable._worker,
             test_configuration = struct(
@@ -837,6 +847,13 @@ implicit dependencies of any Swift compilation or linking target.
                     [SwiftInfo],
                 ],
             ),
+            "package_configurations": attr.label_list(
+                doc = """\
+A list of `swift_package_configuration` targets that specify additional compiler
+configuration options that are applied to targets on a per-package basis.
+""",
+                providers = [[SwiftPackageConfigurationInfo]],
+            ),
             "_cc_toolchain": attr.label(
                 default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
                 doc = """\
@@ -848,7 +865,7 @@ toolchain (such as `clang`) will be retrieved.
                 cfg = "exec",
                 allow_files = True,
                 default = Label(
-                    "@build_bazel_rules_swift//tools/worker",
+                    "@build_bazel_rules_swift//tools/worker:worker_wrapper",
                 ),
                 doc = """\
 An executable that wraps Swift compiler invocations and also provides support
